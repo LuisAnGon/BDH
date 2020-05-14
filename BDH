@@ -1,0 +1,503 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 20 14:06:44 2020
+
+@author: lagonzal
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import glob
+import re
+import os
+import copy
+import csv
+import sys
+import seaborn as sns
+import tkinter
+from tkinter import Tk
+from tkinter.filedialog import askopenfilename
+
+path = os.path.abspath(os.getcwd())
+
+Tk().withdraw() # we don't want a full GUI, so keep the root window from appearing
+path = os.path.abspath(askopenfilename()) # show an "Open" dialog box and return the path to the selected file
+path='\\'.join(path.split('\\')[0:-1])
+print(path)
+      
+frame = pd.DataFrame()
+                    
+b = 0
+csvfilenames = glob.glob(path+"/*NF.csv") 
+lenghts=[]
+ 
+for filename in csvfilenames:      
+    dfs=pd.DataFrame(pd.read_csv(filename))
+    #print(filename)
+    frame=frame.append(dfs,sort=False) 
+
+header_list = list(frame.columns)
+Temps = ['1.1-Temp', '1.2-Temp',
+       '1.3-Temp', '1.5-Temp', '1.6-Temp', '1.7-Temp', '3.1-Temp', '3.2-Temp',
+       '3.3-Temp', '3.4-Temp', '3.5-Temp', '3.6-Temp', '3.7-Temp']
+Masses= ['M2', 'M12', 'M13', 'M14', 'M15',
+       'M16', 'M18', 'M28', 'M29', 'M32', 'M40', 'M44']
+Masses_cal = ['M2','M15','M18','M28','M44']
+Pressures =['P Middle [mbar]', 'P Front [mbar]',
+       'P Back [mbar]', 'P Vessel [mbar]']
+Shuter=['Absorber','SectorValve']
+Beam=['Beam Current [mA]', 'Beam Energy [GeV]']
+
+##########################################     Correction Index DataFrame Raw    ###########################################
+#index=len(frame.index)
+#lst_index=list(range(len(frame.index)))  
+
+frame.index=list(range(len(frame.index)))
+
+#########################################         Obtain time column starting from 0 seconds
+
+print('Creating Data Frame Column time increment')
+
+frame['Time_reduced']=frame['Unix Time']-frame['Unix Time'].min()
+    
+print('Creating Raw CSV')
+
+frame.to_csv(r''+path+'\\Raw.csv')
+
+#########################################      Apply RGA calibration                       ###########################################
+
+Gasses = ['H2','CH4','H2O','CO','CO2']
+#    Ssem=[16.71, 33.95, 0.09,68.53,9.68]
+Ssem=[16.71, 38.6, 0.09,43.4,10.08]
+Sfar=[10788.95, 63485.23, 173.30, 70294.90, 10439.50]
+CO2fractionfar=59.17
+CO2fractionsem=91.16
+cal_SEM=pd.DataFrame()
+cal_FAR=pd.DataFrame()
+
+Total= pd.DataFrame()
+
+SEM=copy.deepcopy(frame[frame['SEM?']==1])
+FAR=copy.deepcopy(frame[frame['SEM?']==0])
+
+i=0
+for mass in Masses_cal:
+    if str(mass)=='M28':
+#                
+        FAR[str(Gasses[i])]=Sfar[i]*(FAR[str(mass)].sub(FAR['M44']*(CO2fractionfar/100)))
+        SEM[str(Gasses[i])]=Sfar[i]*(SEM[str(mass)].sub(SEM['M44']*(CO2fractionfar/100)))
+    else:
+#                
+        FAR[str(Gasses[i])]=Sfar[i]*FAR[str(mass)]
+        SEM[str(Gasses[i])]=Sfar[i]*SEM[str(mass)]
+    i+=1
+    
+
+cal=pd.concat([FAR,SEM],axis='rows').sort_index(level=0)    
+    
+
+Total=cal['H2']+cal['CH4']+cal['H2O']+cal['CO']+cal['CO2']
+cal["Total Pressure"]=Total  
+
+
+print('Creating Cal CSV')
+
+cal.to_csv(r''+path+'\\Cal.csv')
+
+irr=cal[cal['Beam Energy [GeV]']==2.5]
+irr=irr[irr['Beam Current [mA]']>=35]
+irr=irr[irr['Absorber']==1]
+irr=irr[irr['PositionMotorUp']>=0]
+irr['Time_reduced']=irr['Time_reduced']-irr['Time_reduced'].min()
+irr=irr.reset_index()
+irr.to_csv(r''+path+'\\Irr.csv')
+
+print('######################################################################################')
+print('frame DataFrame has the Raw data')
+print('cal DataFrame has the RGA calibrated')
+print('irr dataFrame has the RGA calibrated and filtered for irradiation')
+#########################################    FUNCTIONS
+
+def PSD(frame,increment,phflux):
+    BG=[4E-6,2E-6,1.8E-9,9E-6,4.6E-8]
+    PSD=pd.DataFrame()
+    PSD['Dose']=frame['Beam Current [mA]'].mul((increment*phflux)/(130*1.8)).cumsum()
+    #calculate dynamic pressures
+    gasses = ['H2','CH4','H2O','CO','CO2']
+    i=0
+    for gas in gasses:
+        PSD[gas+'_dyn']=(frame[gas]-BG[i]).div(frame['Beam Current [mA]'])
+        i+=1
+    return PSD
+    
+ #########################################
+##################################################################################
+#########################################
+
+def removeSpikes(dframe,col_ref,ratio,width):
+    df=copy.deepcopy(dframe)
+    for i,row in df.iterrows():       
+        if i<2*width:
+            pass    
+        else:        
+            average=df.loc[i-width:i,col_ref].mean()
+            
+            if df[col_ref][i]>=ratio*average:
+                df.iloc[i]=df.iloc[i-1]
+                
+            else:
+                pass
+    return df
+
+#########################################
+##################################################################################
+#########################################
+   
+def save(dframe,name):
+    n=str(name)
+    return dframe.to_csv(r''+path+'\\'+n+'.csv')
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def calculateDose(dframe,phflux,Increment):
+    Dose=dframe[['Beam Current [mA]']].mul((Increment*phflux)/(130*1.8))
+    
+    Inc_lst=[]
+#
+    for i,row in Dose.iterrows():
+        ##    print(i)
+        if i==0:
+            Inc_lst.append(1E15)    
+        else:
+            to_append=Dose.iloc[i]['Beam Current [mA]']+Inc_lst[i-1]
+            Inc_lst.append(to_append)
+#
+    Dose2=pd.DataFrame(Inc_lst)
+#    Dose2=Dose*dframe.iloc[:]['Beam Current [mA]'].to_frame().values
+    dframe.insert(3,'Dose', Dose2)
+#    Dose3=Dose2.rename(columns={'Time Reduced':'Dose'})
+#    Dose4=dframe.insert(3,'Dose', Dose3)
+    
+    return dframe 
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def clearfigure():
+    figure, ax=plt.subplots()
+    return figure 
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def filt(dframe,column,Min,Max):
+#    filtered=pd.DataFrame('x', index=range(0), columns=header_list)
+    lst=[[]]
+    size=len(dframe.index)
+    for i,row in dframe.iterrows():
+        percent=round(100-(((size-i)/size)*100))
+        sys.stdout.write("\rFiltered Percentage %i" % percent)
+        sys.stdout.flush()
+#        sys.stdout.write("\rFiltered %percent" % percent)
+#        sys.stdout.flush()
+        if dframe.iloc[i][column]>Min and dframe.iloc[i][column]<Max:  
+            #print ('MIN'+str(i))
+            lst.append(dframe.iloc[i].tolist()) 
+        else:
+            pass
+    filtered=pd.DataFrame(lst,columns=dframe.columns.tolist())  
+    filtered.drop(filtered.index[0],inplace = True)
+    filtered.index=list(range(len(filtered.index)))     
+    return filtered
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def filtmax(dframe,column,Max):
+#    filtered=pd.DataFrame('x', index=range(0), columns=header_list)
+    lst=[[]]
+    for i,row in dframe.iterrows():
+        if dframe.iloc[i][column]<Max:
+            lst.append(dframe.iloc[i].tolist())    
+    filtered=pd.DataFrame(lst,columns=dframe.columns.tolist())  
+    filtered.drop(filtered.index[0],inplace = True)
+    filtered.index=list(range(len(filtered.index)))     
+    return filtered
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def filtmin(dframe,column,Min):
+#    filtered=pd.DataFrame('x', index=range(0), columns=header_list)
+    lst=[[]]
+    size=len(dframe.index)
+    for i,row in dframe.iterrows():
+        percent=round(100-(((size-i)/size)*100))
+        sys.stdout.write("\rFiltered Percentage %i" % percent)
+        sys.stdout.flush()
+        if dframe.iloc[i][column]>Min:
+            lst.append(dframe.iloc[i].tolist())    
+    filtered=pd.DataFrame(lst,columns=dframe.columns.tolist())  
+    filtered.drop(filtered.index[0],inplace = True)
+    filtered[[header_list[2]]]=filtered[[header_list[2]]].sub(filtered[[header_list[2]]].min())
+    filtered.index=list(range(len(filtered.index)))     
+    return filtered
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def manyaxis(dframe,xaxis,listofcolumns,title='Graph'):
+    
+    c=['b','g','r','k','c','m','y','b','g','r','k','c','m','y','b','g','r','k','c','m','y']
+#    size=len(listofcolumns)
+#    paleta=sns.color_palette('hls',size)
+    figure, ax=plt.subplots()
+    X=dframe[str(xaxis)].tolist()
+    i=0
+    j=0.9
+    for column in listofcolumns:
+        if i==0:
+            ax.set_title(str(title))
+            ax.plot(X,dframe[str(column)].tolist(),color=c[i])
+            ax.set_ylabel(r''+str(column),color=c[i])
+            ax.spines["left"].set_color(c[i])
+            ax.tick_params(axis='y', colors=c[i])
+            ax.set_xlabel(r''+'Hours',color=c[i])
+        
+        else:
+            newaxis=ax.twinx()
+            newaxis.plot(X,dframe[str(column)].tolist(),color=c[i])
+            newaxis.set_ylabel(r''+str(column),color=c[i])
+            newaxis.spines["right"].set_position(("axes",j))
+            newaxis.spines["right"].set_color(c[i])
+            newaxis.tick_params(axis='y', colors=c[i])
+            
+        j=j+0.1
+        i=i+1
+    return figure
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def newfig(figureName):
+    figureName, ax=plt.subplots()
+    return figureName
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def normalizeMasses(dframe,BGlist):
+    Mass_Cal_header_list = ['M2','M15','M18','M28','M44']
+    i=0
+    for mass in Mass_Cal_header_list:
+#        print(dframe[str(mass)])
+        dframe[str(mass)]=dframe[str(mass)]-BGlist[i]
+        dframe[str(mass)]=dframe[str(mass)]/dframe['Beam Current [mA]']
+         
+        
+#        dframe.iloc[:][str(mass)]=dframe.iloc[:][str(mass)].sub(BGlist[i])
+#        dframe.iloc[:][str(mass)]=dframe.iloc[:]['Beam Current [mA]']
+        i+=1
+    newframe=dframe
+    return newframe
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def normalizeBAGs(dframe,BGlist):
+    BAGs_header_list = ['P Front [mbar]','P Back [mbar]', 'P Vessel [mbar]']
+    i=0
+    for mass in BAGs_header_list:
+#        print(dframe[str(mass)])
+        dframe[str(mass)]=dframe[str(mass)]-BGlist[i]
+        dframe[str(mass)]=dframe[str(mass)]/dframe['Beam Current [mA]']
+         
+        
+#        dframe.iloc[:][str(mass)]=dframe.iloc[:][str(mass)].sub(BGlist[i])
+#        dframe.iloc[:][str(mass)]=dframe.iloc[:]['Beam Current [mA]']
+        i+=1
+    newframe=dframe
+    return newframe
+
+#########################################
+##################################################################################
+#########################################
+
+def pick(dframe,listofcolumns):
+    return dframe[listofcolumns]
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+#def ploty(dframe,xaxis,listofcolumns, xlog ,ylog ,title='Graph'):
+#    figure, ax=plt.subplots()
+#    if xaxis == 'index':
+#        X=dframe.index.values.tolist()
+#    else:    
+#        X=dframe[str(xaxis)].tolist()  
+#    ax.set_title(str(title))
+#    if ylog == 0:    
+#        ax.set_yscale('linear')
+#    else:
+#        ax.set_yscale('log')
+#    if xlog == 0:    
+#        ax.set_xscale('linear')
+#    else:
+#        ax.set_xscale('log')
+#    for i in listofcolumns:
+#        ax.plot.scatter(X,dframe[str(i)].tolist(),s=4) 
+#    ax.set_xlabel(r''+'Hours',color='black')
+#    return figure
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def ploty(dframe,xaxis,listofcolumns, xlog ,ylog ,title='Graph'):
+    figure, ax=plt.subplots()
+    if xaxis == 'index':
+        X=dframe.index.values.tolist()
+    else:    
+        X=dframe[str(xaxis)].tolist()  
+    ax.set_title(str(title))
+    if ylog == 0:    
+        ax.set_yscale('linear')
+    else:
+        ax.set_yscale('log')
+    if xlog == 0:    
+        ax.set_xscale('linear')
+    else:
+        ax.set_xscale('log')
+    for i in listofcolumns:
+        ax.plot(X,dframe[str(i)].tolist(),marker='o', linestyle='dashed', linewidth=0, markersize=2,label=str(i)) 
+    ax.set_xlabel(r''+'Hours',color='black')
+    plt.legend()
+    return figure
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def reduceTime(dframe):
+    lst=[0]*len(dframe)
+    lst2=lst
+    i=0
+#    size=len(dframe)
+    for x in range(0,len(dframe)):
+#        percent=round(100-(((size-i)/size)*100))
+#        sys.stdout.write("\rReduced Percentage %i" % percent)
+#        sys.stdout.flush()
+        if i==0:
+            lst[0]=5
+            lst2[0]=5
+        else:
+            step=(int(frame.loc[i]['Unix Time'])-int(frame.loc[i-1]['Unix Time']))
+            if step != 5 and step != 300:
+                step=5
+            else:
+                pass
+            
+#            lst.append(step)
+            lst2[i]=step+lst2[i-1]
+#    del dframe['Time Reduced']
+        i+=1
+    d={'Time Step':lst2}
+    new_time_increment=pd.DataFrame(data=d)
+#    new_time_increment['Time Reduced']=new_time_increment['Time Reduced'].mul(Increment)
+    dframe.insert(3,'Time Step', new_time_increment)
+   
+    return dframe
+
+
+#########################################
+##################################################################################
+#########################################
+    
+
+def selectBGs(dframe,index):
+    
+    BGs=[abs(dframe['M2'][index]),abs(dframe['M15'][index]),abs(dframe['M18'][index]),abs(dframe['M28'][index]),abs(dframe['M44'][index])]
+    
+    return BGs
+
+
+
+
+#    
+#else:
+ #   pass
+
+def calibrateRGA(frame,SEM=1):
+    Masses = ['M2','M15','M18','M28','M44']
+    Gasses = ['H2','CH4','H2O','CO','CO2']
+#    Ssem=[16.71, 33.95, 0.09,68.53,9.68]
+    Ssem=[16.71, 38.6, 0.09,43.4,10.08]
+    Sfar=[10788.95, 63485.23, 173.30, 70294.90, 10439.50]
+    CO2fractionfar=59.17
+    CO2fractionsem=91.16
+    cal=pd.DataFrame()
+    Total= pd.DataFrame()
+    if SEM == 0:
+        i=0
+        for mass in Masses:
+            if str(mass)=='M28':
+#                cal[str(mass)]=Sfar[i]*(frame[str(mass)]-(frame['M44']*(CO2fractionfar/100)))
+                cal[str(Gasses[i])]=Sfar[i]*(frame[str(mass)].sub(frame['M44']*(CO2fractionfar/100)))
+            else:
+#                cal[str(mass)]=frame[str(mass)]*Sfar[i]
+                cal[str(Gasses[i])]=Sfar[i]*frame[str(mass)]
+            i+=1
+            
+        
+    elif SEM == 1:
+        i=0
+        for mass in Masses:
+            if str(mass)=='M28':
+                cal[str(Gasses[i])]=Ssem[i]*(frame[str(mass)].sub(frame['M44']*(CO2fractionsem/100)))
+#                cal[str(mass)]=Ssem[i]*(frame[str(mass)]-(frame['M44']*(CO2fractionsem/100)))
+            else:
+                cal[str(Gasses[i])]=Ssem[i]*frame[str(mass)]
+#                cal[str(mass)]=frame[str(mass)]*Ssem
+            i+=1
+            
+        
+    
+    Total=cal['H2']+cal['CH4']+cal['H2O']+cal['CO']+cal['CO2']
+    cal["Total Pressure"]=Total  
+    return cal
+    
+
+        
